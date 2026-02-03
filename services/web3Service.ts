@@ -2,9 +2,14 @@ import { ethers } from 'ethers';
 import { RENTAL_ABI, RENTAL_BYTECODE } from '../constants';
 import { agreementApi } from './apiService';
 
+let cachedProvider: ethers.BrowserProvider | null = null;
+
 export const getProvider = () => {
   if (typeof window !== 'undefined' && (window as any).ethereum) {
-    return new ethers.BrowserProvider((window as any).ethereum);
+    if (!cachedProvider) {
+      cachedProvider = new ethers.BrowserProvider((window as any).ethereum);
+    }
+    return cachedProvider;
   }
   return null;
 };
@@ -16,13 +21,19 @@ export const connectWallet = async () => {
     console.warn("MetaMask not found, entering Demo Mode.");
     return {
       address: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
-      isSimulated: true
+      isSimulated: true,
+      network: { name: 'Demo', chainId: 0 }
     };
   }
 
   try {
     const accounts = await provider.send("eth_requestAccounts", []);
-    return { address: accounts[0], isSimulated: false };
+    const network = await provider.getNetwork();
+    return {
+      address: accounts[0],
+      isSimulated: false,
+      network: { name: network.name, chainId: Number(network.chainId) }
+    };
   } catch (err) {
     throw new Error("User denied account access");
   }
@@ -100,14 +111,37 @@ export const confirmAgreement = async (address: string, deposit: string, rent: s
   const signer = await provider.getSigner();
   const contract = new ethers.Contract(address, RENTAL_ABI, signer);
 
-  // Use BigInt math to avoid floating point issues
+  // Fetch data from contract to verify
+  const [contractTenant, contractLandlord, contractState, cSecurity, cRent] = await Promise.all([
+    contract.tenant(),
+    contract.landlord(),
+    contract.state(),
+    contract.securityDeposit(),
+    contract.rentAmount()
+  ]);
+
+  const signerAddress = await signer.getAddress();
+  const totalValueNeeded = cSecurity + cRent;
+  const isTenant = signerAddress.toLowerCase() === contractTenant.toLowerCase();
+
+  console.log('--- CRITICAL DEBUG: Confirming Agreement ---');
+  console.log('Signer Address (You):', signerAddress);
+  console.log('Contract Tenant:', contractTenant);
+  console.log('Contract Landlord:', contractLandlord);
+  console.log('Contract State:', contractState.toString(), '(0=Created, 1=Active)');
+  console.log('Required Value (Wei):', totalValueNeeded.toString());
+  console.log('Sending Value (Wei):', (ethers.parseEther(deposit) + ethers.parseEther(rent)).toString());
+  console.log('Is Signer Tenant?:', isTenant);
+
+  if (!isTenant) {
+    throw new Error(`Auth Error: Your MetaMask account (${signerAddress.slice(0, 6)}...) is NOT the Tenant specified in this contract (${contractTenant.slice(0, 6)}...). Please switch accounts.`);
+  }
+
+  if (Number(contractState) !== 0) {
+    throw new Error(`State Error: Contract is already in state ${contractState}. It must be in state 0 (Created) to confirm.`);
+  }
+
   const totalValue = ethers.parseEther(deposit) + ethers.parseEther(rent);
-
-  console.log('--- Debug: Confirming Agreement ---');
-  console.log('Contract Address:', address);
-  console.log('Signer Address:', await signer.getAddress());
-  console.log('Sending Total Value:', ethers.formatEther(totalValue), 'ETH');
-
   const tx = await contract.confirmAgreement({ value: totalValue });
   await tx.wait();
 
@@ -165,11 +199,42 @@ export const getLeaseDataFromChain = async (address: string) => {
   };
 };
 
+export const getNetwork = async () => {
+  const provider = getProvider();
+  if (!provider) return null;
+  const network = await provider.getNetwork();
+  return { name: network.name, chainId: Number(network.chainId) };
+};
+
 export const getBalance = async (address: string) => {
   const provider = getProvider();
   if (!provider) return "0";
-  const balance = await provider.getBalance(address);
-  return ethers.formatEther(balance);
+  try {
+    const balance = await provider.getBalance(address);
+    return ethers.formatEther(balance);
+  } catch (err) {
+    console.error("getBalance error:", err);
+    return "0";
+  }
+};
+
+export const switchToGanache = async () => {
+  if (typeof window !== 'undefined' && (window as any).ethereum) {
+    try {
+      await (window as any).ethereum.request({
+        method: 'wallet_addEthereumChain',
+        params: [{
+          chainId: '0x539', // 1337
+          chainName: 'Ganache Local',
+          nativeCurrency: { name: 'ETH', symbol: 'ETH', decimals: 18 },
+          rpcUrls: ['http://127.0.0.1:7545'], // Default Ganache RPC
+          blockExplorerUrls: null
+        }]
+      });
+    } catch (err) {
+      console.error("Failed to add/switch network:", err);
+    }
+  }
 };
 
 export const getLeaseData = async (userAddress: string) => {

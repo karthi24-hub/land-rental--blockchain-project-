@@ -6,7 +6,9 @@ import {
   deployAgreement,
   confirmAgreement,
   payRent,
-  getBalance
+  getBalance,
+  getNetwork,
+  switchToGanache
 } from './services/web3Service';
 import ContractForm from './components/ContractForm';
 import ContractDetails from './components/ContractDetails';
@@ -14,11 +16,12 @@ import TransactionHistory from './components/TransactionHistory';
 import PrototypeExplanation from './components/PrototypeExplanation';
 
 const App: React.FC = () => {
-  const [user, setUser] = useState<UserState & { isSimulated?: boolean }>({
+  const [user, setUser] = useState<UserState & { isSimulated?: boolean, network?: { name: string, chainId: number } }>({
     address: null,
     isConnected: false,
     role: 'NONE',
-    isSimulated: false
+    isSimulated: false,
+    network: undefined
   });
   const [activeLease, setActiveLease] = useState<LeaseAgreement | null>(null);
   const [loading, setLoading] = useState(false);
@@ -28,17 +31,19 @@ const App: React.FC = () => {
 
   const fetchBalance = async (address: string) => {
     try {
+      console.log(`fetchBalance: Requesting balance for ${address}`);
       const bal = await getBalance(address);
+      console.log(`fetchBalance: Result for ${address} is ${bal} ETH`);
       setBalance(bal);
     } catch (e) {
-      console.error(e);
+      console.error("fetchBalance: Error in App.tsx:", e);
     }
   };
 
   const handleConnect = async () => {
     setLoading(true);
     try {
-      const { address, isSimulated } = await connectWallet();
+      const { address, isSimulated, network } = await connectWallet();
       const lease = await getLeaseData(address);
       let role: 'LANDLORD' | 'TENANT' | 'NONE' = address.toLowerCase().endsWith('f') || address.toLowerCase().endsWith('1')
         ? 'LANDLORD'
@@ -50,7 +55,7 @@ const App: React.FC = () => {
         setActiveLease(lease as any);
       }
 
-      setUser({ address, isConnected: true, role, isSimulated });
+      setUser({ address, isConnected: true, role, isSimulated, network });
       if (address) {
         fetchBalance(address);
       }
@@ -59,6 +64,13 @@ const App: React.FC = () => {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleLogout = () => {
+    setUser({ address: null, isConnected: false, role: 'NONE', isSimulated: false, network: undefined });
+    setActiveLease(null);
+    setTransactions([]);
+    setView('DASHBOARD');
   };
 
   useEffect(() => {
@@ -72,8 +84,10 @@ const App: React.FC = () => {
       };
 
       (window as any).ethereum.on('accountsChanged', handleAccountsChanged);
+      (window as any).ethereum.on('chainChanged', () => window.location.reload());
       return () => {
         (window as any).ethereum.removeListener('accountsChanged', handleAccountsChanged);
+        (window as any).ethereum.removeListener('chainChanged', () => window.location.reload());
       };
     }
   }, [handleConnect]);
@@ -102,6 +116,7 @@ const App: React.FC = () => {
       }, ...prev]);
 
       setView('DASHBOARD');
+      if (user.address) fetchBalance(user.address);
     } catch (error: any) {
       const message = error.response?.data?.error || error.message;
       alert("Deployment failed: " + message);
@@ -154,6 +169,8 @@ const App: React.FC = () => {
         timestamp: Date.now(),
         type: 'RENT'
       }, ...prev]);
+
+      if (user.address) fetchBalance(user.address);
     } catch (error) {
       alert("Payment failed: " + (error as Error).message);
     } finally {
@@ -165,13 +182,7 @@ const App: React.FC = () => {
     alert("Termination is handled via contract. Access control applies.");
   };
 
-
-  const handleLogout = () => {
-    setUser({ address: null, isConnected: false, role: 'NONE', isSimulated: false });
-    setActiveLease(null);
-    setTransactions([]);
-    setView('DASHBOARD');
-  };
+  const isWrongNetwork = user.isConnected && !user.isSimulated && user.network?.chainId !== 1337 && user.network?.chainId !== 5777;
 
   return (
     <div className="min-h-screen flex flex-col">
@@ -179,6 +190,21 @@ const App: React.FC = () => {
         <div className="bg-amber-500 text-white text-center py-1.5 px-4 text-xs font-bold uppercase tracking-widest flex items-center justify-center gap-2">
           <i className="fas fa-vial"></i>
           Simulator Mode: No real ETH is being used. Install MetaMask for real transactions.
+        </div>
+      )}
+
+      {isWrongNetwork && (
+        <div className="bg-red-600 text-white py-3 px-4 text-sm font-bold flex items-center justify-center gap-4 animate-in slide-in-from-top duration-500">
+          <div className="flex items-center gap-2">
+            <i className="fas fa-exclamation-circle text-lg animat-pulse"></i>
+            <span>WRONG NETWORK DETECTED: You are currently on {user.network?.name || 'an unknown network'}.</span>
+          </div>
+          <button
+            onClick={switchToGanache}
+            className="bg-white text-red-600 px-4 py-1 rounded-full text-xs hover:bg-red-50 transition-colors shadow-sm"
+          >
+            Switch to Ganache (1337)
+          </button>
         </div>
       )}
 
@@ -195,10 +221,10 @@ const App: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-4">
-              {user.isConnected && parseFloat(balance) === 0 && !user.isSimulated && (
+              {user.isConnected && (parseFloat(balance) === 0 || isWrongNetwork) && !user.isSimulated && (
                 <div className="bg-red-50 text-red-600 px-4 py-2 rounded-xl text-[10px] font-bold border border-red-100 flex items-center gap-2">
                   <i className="fas fa-exclamation-triangle"></i>
-                  LOW BALANCE: Check Ganache
+                  {isWrongNetwork ? 'WRONG NETWORK' : 'LOW BALANCE: Check Ganache'}
                 </div>
               )}
 
@@ -206,7 +232,7 @@ const App: React.FC = () => {
                 <div className="flex items-center gap-3">
                   <div className="hidden md:block text-right">
                     <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter leading-none mb-1">
-                      {user.isSimulated ? 'TESTNET WALLET' : 'GANACHE LOCAL'}
+                      {user.isSimulated ? 'TESTNET WALLET' : (user.network?.name || 'LOCAL')}
                     </p>
                     <p className="text-sm font-semibold text-slate-900">{user.address?.slice(0, 6)}...{user.address?.slice(-4)}</p>
                   </div>
