@@ -262,6 +262,7 @@ export const getLeaseData = async (userAddress: string) => {
       }
     }
 
+
     console.log("No lease found in DB for address:", userAddress);
     return null;
   } catch (err) {
@@ -269,3 +270,80 @@ export const getLeaseData = async (userAddress: string) => {
     return null;
   }
 };
+
+export const getAgreementTransactions = async (contractAddress: string) => {
+  const provider = getProvider();
+  if (!provider) return [];
+
+  try {
+    const contract = new ethers.Contract(contractAddress, RENTAL_ABI, provider);
+
+    // Get current block to limit range if needed, but for now we query from genesis (or contract creation)
+    // However, querying from block 0 can be slow on mainnet. On local/testnet it's fine.
+    // Ideally we should know the deployment block.
+
+    const filterActive = contract.filters.ContractActive();
+    const filterRent = contract.filters.RentPaid();
+    const filterRefund = contract.filters.SecurityDepositRefunded();
+
+    const [activeEvents, rentEvents, refundEvents] = await Promise.all([
+      contract.queryFilter(filterActive),
+      contract.queryFilter(filterRent),
+      contract.queryFilter(filterRefund)
+    ]);
+
+    const txs: any[] = [];
+
+    // Process ContractActive (Initial Payment)
+    for (const event of activeEvents) {
+      if ('getTransaction' in event) { // Setup for Ethers v6 events
+        const tx = await event.getTransaction();
+        const block = await event.getBlock();
+        txs.push({
+          hash: event.transactionHash,
+          from: tx.from,
+          to: contractAddress,
+          value: ethers.formatEther(tx.value),
+          timestamp: (block.timestamp * 1000),
+          type: 'DEPOSIT'
+        });
+      }
+    }
+
+    // Process RentPaid
+    for (const event of rentEvents) {
+      const block = await event.getBlock();
+      // args: [tenant, amount, date]
+      const args = (event as any).args;
+      txs.push({
+        hash: event.transactionHash,
+        from: args[0],
+        to: contractAddress,
+        value: ethers.formatEther(args[1]),
+        timestamp: (block.timestamp * 1000), // block timestamp is usually seconds
+        type: 'RENT'
+      });
+    }
+
+    // Process Refunds
+    for (const event of refundEvents) {
+      const block = await event.getBlock();
+      // args: [tenant, amount]
+      const args = (event as any).args;
+      txs.push({
+        hash: event.transactionHash,
+        from: contractAddress,
+        to: args[0],
+        value: ethers.formatEther(args[1]),
+        timestamp: (block.timestamp * 1000),
+        type: 'REFUND'
+      });
+    }
+
+    return txs.sort((a, b) => b.timestamp - a.timestamp);
+  } catch (err) {
+    console.error("Error fetching transactions:", err);
+    return [];
+  }
+};
+

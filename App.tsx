@@ -8,7 +8,8 @@ import {
   payRent,
   getBalance,
   getNetwork,
-  switchToGanache
+  switchToGanache,
+  getAgreementTransactions
 } from './services/web3Service';
 import ContractForm from './components/ContractForm';
 import ContractDetails from './components/ContractDetails';
@@ -53,6 +54,13 @@ const App: React.FC = () => {
         if (lease.landlord.toLowerCase() === address.toLowerCase()) role = 'LANDLORD';
         else if (lease.tenant.toLowerCase() === address.toLowerCase()) role = 'TENANT';
         setActiveLease(lease as any);
+
+        // Fetch transaction history
+        if (!isSimulated) {
+          getAgreementTransactions(lease.id).then((txs: any) => {
+            setTransactions(txs);
+          });
+        }
       }
 
       setUser({ address, isConnected: true, role, isSimulated, network });
